@@ -605,6 +605,8 @@ google.golang.org/grpc/internal
 google.golang.org/grpc/status
 # gopkg.in/fsnotify.v1 v1.4.7
 gopkg.in/fsnotify.v1
+# gopkg.in/getlantern/deepcopy.v1 v1.0.0-20140913144530-b923171e8640
+gopkg.in/getlantern/deepcopy.v1
 # gopkg.in/inf.v0 v0.9.1
 gopkg.in/inf.v0
 # gopkg.in/ini.v1 v1.57.0

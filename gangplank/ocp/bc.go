@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -230,41 +231,52 @@ binary build interface.`)
 	defer cancel()
 
 	terminate := make(chan bool)
+	errorCh := make(chan error)
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-		select {
-		case <-sig:
-			terminate <- true
-		case <-ctx.Done():
-			terminate <- true
+		for {
+			select {
+			case err := <-errorCh:
+				if err != nil {
+					terminate <- true
+				}
+			case <-sig:
+				terminate <- true
+			case <-ctx.Done():
+				terminate <- true
+			case <-terminate:
+				log.Info("Termination signaled")
+				return
+			}
 		}
 	}()
 
-	// Each stage is executed in its own pod
-	for idx, s := range bc.JobSpec.Stages {
-		ws := &workSpec{
-			APIBuild:      apiBuild,
-			ExecuteStages: []string{s.ID},
-			JobSpec:       bc.JobSpec,
-			RemoteFiles:   remoteFiles,
-			Return:        returnTo,
+	type workFunction func(wg *sync.WaitGroup, errCh chan<- error)
+	workerFuncs := make(map[int][]workFunction)
+
+	// Range over the stages and create workFunction, which is added to the
+	// workerFuncs. Each workFunction is executed as a go routine that begins
+	// work as soon as the `build_dependencies` are available.
+	for idx, ss := range bc.JobSpec.Stages {
+
+		// copy the stage to prevent corruption
+		s, err := ss.DeepCopy()
+		if err != nil {
+			return err
 		}
 
-		// Loop to wait for the artifacts are ready.
-		ready := false
-		for {
+		l := log.WithFields(log.Fields{
+			"stage":              s.ID,
+			"required_artifacts": s.RequireArtifacts,
+		})
 
-			if ready {
-				log.WithField("stage id", s.ID).Info("Worker dependences have been defined")
-				break
-			}
+		anonFunc := func(wg *sync.WaitGroup, errCh chan<- error) {
+			defer wg.Done()
 
-			select {
-			case <-terminate:
-				return nil
-			default:
+			// ready is a function to ensure that the depedencies are ready/avaiable
+			ready := func(ws *workSpec) bool {
 				// For _each_ stage, we need to check if a meta.json exists.
 				// mBuild - *cosa.Build representing meta.json
 				mBuild, _, _ := cosa.ReadBuild(cosaSrvDir, buildID, "")
@@ -274,6 +286,8 @@ binary build interface.`)
 				if mBuild != nil && mBuild.BuildID != buildID {
 					log.WithField("buildID", mBuild.BuildID).Info("Found new build ID")
 					buildID = mBuild.BuildID
+					l = log.WithField("buildID", buildID)
+					l.Info("Found new build ID")
 				}
 
 				buildPath := filepath.Join(buildID, cosa.BuilderArch())
@@ -286,7 +300,7 @@ binary build interface.`)
 					}
 					n := filepath.Base(info.Name())
 					if !(strings.HasPrefix(n, "meta") && strings.HasSuffix(n, ".json")) {
-						log.WithField("file", n).Warning("excluded")
+						l.WithField("file", n).Warning("excluded")
 						return nil
 					}
 					keyPath := filepath.Join(buildPath, n)
@@ -298,32 +312,27 @@ binary build interface.`)
 							Object: keyPath,
 						},
 					)
-					log.WithField("file", keyPath).Info("Sending meta-data to worker")
+					l.WithField("file", keyPath).Info("Included metadata")
 					return nil
 				})
 
+				foundCount := 0
 				for _, artifact := range s.RequireArtifacts {
+					l.WithField("artifact", artifact).Info("Checking for required artifact")
+					if mBuild == nil {
+						l.WithField("artifact", artifact).Info("meta.json is not available yet")
+						return false
+					}
 					bArtifact, err := mBuild.GetArtifact(artifact)
 					if err != nil {
-						log.WithFields(log.Fields{
-							"stage":    s.ID,
-							"artifact": artifact,
-						}).Info("Waiting on artifact")
-						time.Sleep(15 * time.Second)
-						break
+						l.WithField("artifact", artifact).Info("artifacts is not available yet")
+						return false
 					}
 
 					// get the Minio relative path for the object
 					// the full path needs to be broken in to <BUILDID>/<ARCH>/<FILE>
 					keyPath := filepath.Join(buildPath, filepath.Base(bArtifact.Path))
-
-					log.WithFields(log.Fields{
-						"artifact path": keyPath,
-						"artifact":      artifact,
-						"buildID":       buildID,
-						"stage":         s.ID,
-					}).Info("Found required artifact")
-
+					l.WithField("path", keyPath).Info("Found required artifact")
 					r := &RemoteFile{
 						Artifact: bArtifact,
 						Bucket:   "builds",
@@ -331,27 +340,78 @@ binary build interface.`)
 						Object:   keyPath,
 					}
 					ws.RemoteFiles = append(ws.RemoteFiles, r)
+					foundCount++
 				}
+				if len(s.RequireArtifacts) == foundCount {
+					l.Infof("All dependencies for stage have been meet")
+					return true
+				}
+				return false
+			}
 
-				log.WithField("stage", s.ID).Infof("All dependencies for stage have been meet")
-				ready = true
+			// Loop until either until we get the termination signal or the
+			// dependencies are met.
+			for {
+
+				select {
+				case <-terminate:
+					return
+				default:
+					ws := &workSpec{
+						APIBuild:      apiBuild,
+						ExecuteStages: []string{s.ID},
+						JobSpec:       bc.JobSpec,
+						RemoteFiles:   remoteFiles,
+						Return:        returnTo,
+					}
+
+					if !ready(ws) {
+						l.Warning("Waiting for dependencies")
+						time.Sleep(15 * time.Second)
+						break
+					}
+
+					l.Info("Worker dependences have been defined")
+					eVars, err := ws.getEnvVars()
+					if err != nil {
+						errCh <- err
+						return
+					}
+
+					cpod, err := NewCosaPodder(podCtx, apiBuild, idx)
+					if err != nil {
+						log.WithError(err).Error("Failed to create pod definition")
+						errCh <- err
+						return
+					}
+
+					l.Info("Executing worker pod")
+					if err := cpod.WorkerRunner(podCtx, eVars); err != nil {
+						log.WithError(err).Error("Failed stage execution")
+						errCh <- err
+						return
+					}
+				}
 			}
 		}
 
-		eVars, err := ws.getEnvVars()
-		if err != nil {
-			return err
-		}
+		l.Info("workerfunction defined and assinged")
+		workerFuncs[s.ExecutionOrder] = append(workerFuncs[s.ExecutionOrder], anonFunc)
+	}
 
-		cpod, err := NewCosaPodder(podCtx, apiBuild, idx)
-		if err != nil {
-			log.WithError(err).Error("Failed to create pod definition")
-			return err
-		}
-
-		if err := cpod.WorkerRunner(podCtx, eVars); err != nil {
-			log.WithError(err).Error("Failed stage execution")
-			return err
+	// iterate through each group of workerFuncs
+	for key, wf := range workerFuncs {
+		log.WithField("execution group", key).Info("Starting Group of workers")
+		select {
+		case <-terminate:
+			break
+		default:
+			wg := &sync.WaitGroup{}
+			for _, f := range wf {
+				wg.Add(1)
+				go f(wg, errorCh)
+			}
+			wg.Wait()
 		}
 	}
 
