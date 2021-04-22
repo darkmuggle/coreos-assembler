@@ -434,6 +434,18 @@ binary build interface.`)
 
 	close(terminate)
 
+	// Handle registry outputs for a custom build strategy.
+	ru := getCustomBuildRegistryConfig()
+	if ru != nil {
+		b, _, err := cosa.ReadBuild(cosaSrvDir, "latest", "")
+		if err != nil {
+			return err
+		}
+		if err := uploadOstreeToRegistry(ctx, b, ru); err != nil {
+			return err
+		}
+	}
+
 	// Yeah, this is lazy...
 	args := []string{"find", "/srv/builds", "-type", "f"}
 	cmd := exec.Command(args[0], args[1:]...)

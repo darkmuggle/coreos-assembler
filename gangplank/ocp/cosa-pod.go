@@ -228,7 +228,7 @@ func (cp *cosaPod) getPodSpec(envVars []v1.EnvVar) (*v1.Pod, error) {
 		initCtr := cosaBasePod.DeepCopy()
 		initCtr.Name = "init"
 		initCtr.Args = []string{"/bin/bash", "-xc", fmt.Sprintf(`#!/bin/bash
-export PATH=/usr/sbin:/usr/bin
+export PATH=/usr/sbin:/usr/bin:/usr/local/bin:/usr/local/sbin:$PATH
 %s
 `, strings.Join(cp.ocpInitCommand, "\n"))}
 
