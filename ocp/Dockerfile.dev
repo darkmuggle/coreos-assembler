@@ -5,6 +5,7 @@ USER root
 
 COPY ./ /root/containerbuild/
 RUN cd /root/containerbuild/gangplank && \
+    go clean -cache -modcache -x && \
     make && \
     make install DESTDIR=/ && \
     install -v -D -t /usr/lib/coreos-assembler /root/containerbuild/src/*.{sh,txt}
