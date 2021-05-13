@@ -110,7 +110,9 @@ var (
 	}
 
 	// Define the Securite Contexts
-	ocpSecContext = &v1.SecurityContext{}
+	ocpSecContext = &v1.SecurityContext{
+		AllowPrivilegeEscalation: ptrBool(true),
+	}
 
 	// On OpenShift 3.x, we require privileges.
 	ocp3SecContext = &v1.SecurityContext{
