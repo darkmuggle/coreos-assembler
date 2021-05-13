@@ -96,10 +96,16 @@ func (rd *RenderData) RendererExecuter(ctx context.Context, env []string, script
 		}).Info("Executing rendered script")
 		cmd := exec.CommandContext(ctx, "/bin/bash", cArgs...)
 		cmd.Env = env
+
+		outErr := []byte{}
+		outErrWriter := bytes.NewBuffer(outErr)
+		mwStdOut := io.MultiWriter(os.Stdout, outErrWriter)
+
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = mwStdOut
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("Script exited with return code %v", err)
+			log.WithField("stdErr", string(outErr)).Info("Script exited with stdErr")
+			return fmt.Errorf("Script exited with return code %v: %s", err, string(outErr))
 		}
 		log.WithFields(log.Fields{"script": i}).Info("Script complete")
 	}
