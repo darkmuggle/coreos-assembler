@@ -1,3 +1,5 @@
+// +build podman
+
 package main
 
 import (
@@ -17,6 +19,7 @@ const (
 )
 
 var (
+	// cmdPod executed a builder pod
 	cmdPod = &cobra.Command{
 		Use:   "pod",
 		Short: "Execute COSA command in an OpenShift Cluster (default) or Podman",
@@ -40,14 +43,8 @@ var (
 	// is set for the working directory.
 	cosaWorkDirContext bool
 
-	// cosaSrvDir is used as the scratch directory builds.
-	cosaSrvDir string
-
 	// cosaNamespace when defined will launch the pod in another namespace
 	cosaNamespace string
-
-	// automaticBuildStages is used to create automatic build stages
-	automaticBuildStages []string
 
 	// remoteKubeConfig sets Gangplank in remote mode
 	remoteKubeConfig string
@@ -56,6 +53,7 @@ var (
 func init() {
 	cmdRoot.AddCommand(cmdPod)
 
+	// Define cmdPod flags
 	spec.AddCliFlags(cmdPod.Flags())
 	cmdPod.Flags().BoolVar(&cosaWorkDirContext, "setWorkDirCtx", false, "set workDir's selinux content")
 	cmdPod.Flags().BoolVarP(&cosaViaPodman, "podman", "", false, "use podman to execute task")

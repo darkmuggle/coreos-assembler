@@ -1,3 +1,5 @@
+// +build minio
+
 package main
 
 import (

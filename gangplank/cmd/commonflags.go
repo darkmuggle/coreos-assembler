@@ -8,8 +8,16 @@ import (
 // Flags has the configuration flags.
 var specCommonFlags = flag.NewFlagSet("", flag.ContinueOnError)
 
-// cosaKolaTests are used to generate automatic Kola stages.
-var cosaKolaTests []string
+var (
+	// cosaKolaTests are used to generate automatic Kola stages.
+	cosaKolaTests []string
+
+	// automaticBuildStages is used to create automatic build stages
+	automaticBuildStages []string
+
+	// cosaSrvDir is used as the scratch directory builds.
+	cosaSrvDir string
+)
 
 func init() {
 	specCommonFlags.StringSliceVar(&generateCommands, "singleCmd", []string{}, "commands to run in stage")
