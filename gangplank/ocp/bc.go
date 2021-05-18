@@ -315,8 +315,10 @@ binary build interface.`)
 			}
 
 			select {
-			case <-terminate:
-				return errors.New("terminate signal recieved, aborting stage")
+			case die, ok := <-terminate:
+				if !ok || die {
+					return errors.New("terminate signal recieved, aborting stage")
+				}
 			case <-time.After(stageDependencyTimeOut):
 				return errors.New("required artifacts never appeared")
 			case ok := <-ready(ws, terminate):

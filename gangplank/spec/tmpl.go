@@ -98,10 +98,14 @@ func (rd *RenderData) RendererExecuter(ctx context.Context, env []string, script
 		cmd.Env = env
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("Script exited with return code %v", err)
+		if err := cmd.Run(); err != nil || (cmd.Process != nil && cmd.ProcessState.ExitCode() != 0) {
+			log.WithError(err).WithFields(log.Fields{
+				"script":    i,
+				"exit code": cmd.ProcessState.ExitCode(),
+			}).Warn("script failed execution")
+			return fmt.Errorf("script exited with return code %v", err)
 		}
-		log.WithFields(log.Fields{"script": i}).Info("Script complete")
+		log.WithField("script", i).Info("Script complete")
 	}
 	return nil
 }
