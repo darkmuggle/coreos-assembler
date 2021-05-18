@@ -101,13 +101,16 @@ var (
 	}
 
 	// Define the Securite Contexts
-	ocpSecContext = &v1.SecurityContext{}
+	ocpSecContext = &v1.SecurityContext{
+		AllowPrivilegeEscalation: ptrBool(true),
+	}
 
 	// On OpenShift 3.x, we require privileges.
 	ocp3SecContext = &v1.SecurityContext{
-		RunAsUser:  ptrInt(0),
-		RunAsGroup: ptrInt(1000),
-		Privileged: ptrBool(true),
+		AllowPrivilegeEscalation: ptrBool(true),
+		RunAsUser:                ptrInt(0),
+		RunAsGroup:               ptrInt(1000),
+		Privileged:               ptrBool(true),
 	}
 
 	// InitCommands to be run before work in pod is executed.
