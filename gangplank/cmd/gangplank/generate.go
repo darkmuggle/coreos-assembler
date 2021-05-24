@@ -67,6 +67,22 @@ func init() {
 
 // setCliSpec reads or generates a jobspec based on CLI arguments.
 func setCliSpec() {
+	defer func() {
+		// Always add repos
+		if spec.Recipe.Repos == nil {
+			spec.AddRepos()
+		}
+		if minioSshRemoteHost != "" {
+			log.WithField("ssh host", minioSshRemoteHost).Info("Minio will be forwarded to remote host")
+			spec.Job.MinioSSHForward = minioSshRemoteHost
+			spec.Job.MinioSSHUser = minioSshRemoteUser
+			spec.Job.MinioSSHPass = minioSshRemotePassword
+		}
+		if minioCfgFile != "" {
+			spec.Job.MinioCfgFile = minioCfgFile
+		}
+	}()
+
 	if specFile != "" {
 		js, err := jobspec.JobSpecFromFile(specFile)
 		if err != nil {
@@ -78,9 +94,6 @@ func setCliSpec() {
 			"jobspec":          specFile,
 			"ingored cli args": "-A|--artifact|--singleReq|--singleCmd",
 		}).Info("Using jobspec from file, some cli arguments will be ignored")
-		if spec.Recipe.Repos == nil {
-			spec.AddRepos()
-		}
 		return
 	}
 
@@ -102,10 +115,6 @@ func setCliSpec() {
 				ExecutionOrder: 1,
 			},
 		}
-	}
-
-	if spec.Recipe.Repos == nil {
-		spec.AddRepos()
 	}
 
 	spec.Stages[0].AddCommands(generateCommands)

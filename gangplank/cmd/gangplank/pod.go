@@ -66,6 +66,7 @@ func init() {
 	cmdPod.Flags().StringVarP(&remoteKubeConfig, "remoteKubeConfig", "R", "", "launch COSA in a remote cluster")
 	cmdPod.Flags().StringVarP(&cosaNamespace, "namespace", "N", "", "use a different namespace")
 	cmdPod.Flags().AddFlagSet(specCommonFlags)
+	cmdPod.Flags().AddFlagSet(sshFlags)
 }
 
 // runPod is the Jenkins/CI interface into Gangplank. It "mocks"
@@ -102,7 +103,6 @@ func runPod(c *cobra.Command, args []string) {
 
 	clusterCtx := ocp.NewClusterContext(ctx, cluster)
 	setCliSpec()
-	spec.Job.MinioCfgFile = minioCfgFile
 
 	if cosaWorkDirContext {
 		for _, d := range []string{cosaWorkDir, cosaSrvDir} {

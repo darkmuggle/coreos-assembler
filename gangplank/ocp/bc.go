@@ -156,6 +156,10 @@ func (bc *buildConfig) Exec(ctx ClusterContext) (err error) {
 	// Define, but do not start minio.
 	m := newMinioServer(bc.JobSpec.Job.MinioCfgFile)
 	m.dir = cosaSrvDir
+	m.overSSH = getSshMinioForwarder(&bc.JobSpec)
+	if m.overSSH != nil {
+		m.Host = "127.0.0.1"
+	}
 
 	// returnTo informs the workers where to send their bits
 	returnTo := &Return{
