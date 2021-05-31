@@ -89,17 +89,19 @@ func runPod(c *cobra.Command, args []string) {
 	if cosaViaPodman {
 		if cosaViaRemotePodman != "" {
 			os.Setenv(podmanRemoteEnvVar, cosaViaRemotePodman)
-			minioSshRemoteHost = containerHost()
-			if strings.Contains(minioSshRemoteHost, "@") {
-				parts := strings.Split(minioSshRemoteHost, "@")
-				minioSshRemoteHost = parts[1]
-				minioSshRemoteUser = parts[0]
+			if minioCfgFile != "" {
+				minioSshRemoteHost = containerHost()
+				if strings.Contains(minioSshRemoteHost, "@") {
+					parts := strings.Split(minioSshRemoteHost, "@")
+					minioSshRemoteHost = parts[1]
+					minioSshRemoteUser = parts[0]
+				}
+				log.WithFields(log.Fields{
+					"remote user":     minioSshRemoteUser,
+					"ssh foward host": minioSshRemoteHost,
+					"container host":  cosaViaRemotePodman,
+				}).Info("Minio will be forwarded to remote host")
 			}
-			log.WithFields(log.Fields{
-				"remote user":     minioSshRemoteUser,
-				"ssh foward host": minioSshRemoteHost,
-				"container host":  cosaViaRemotePodman,
-			}).Info("Minio will be forwarded to remote host")
 		}
 
 		cluster = ocp.NewCluster(false)
