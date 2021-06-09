@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/coreos/mantle/util"
@@ -47,27 +48,64 @@ type QOMBlkDev struct {
 	} `json:"return"`
 }
 
-// Create a new QMP socket connection
-func newQMPMonitor(sockaddr string) (*qmp.SocketMonitor, error) {
+// qmpCommand is used to run thread-safe commands around using qmp.Socket.
+type qmpCommand struct {
+	socketPath string
+	mu         sync.Mutex
+}
+
+// qemuSocket is global map that contains the sockets that have been opened
+var qemuSockets = make(map[string]*qmpCommand)
+
+// getQmpMonitor will either create a new qemuSocketMonitor OR return
+// one that has already been created.
+func getQmpMonitor(sockaddr string) (*qmpCommand, error) {
 	qmpPath := filepath.Join(sockaddr, "qmp.sock")
+	q, found := qemuSockets[qmpPath]
+	if found {
+		return q, nil
+	}
+
+	q = &qmpCommand{
+		socketPath: qmpPath,
+		mu:         sync.Mutex{},
+	}
+	qemuSockets[qmpPath] = q
+
+	return q, nil
+}
+
+// run is a thread safe wrapper that ensures that only only one
+// query/command is executed on the qemu qmp socket.
+func (qsm *qmpCommand) run(command string) ([]byte, error) {
+	qsm.mu.Lock()
+	defer qsm.mu.Unlock()
+
 	var monitor *qmp.SocketMonitor
-	var err error
 	if err := util.Retry(10, 1*time.Second, func() error {
-		monitor, err = qmp.NewSocketMonitor("unix", qmpPath, 2*time.Second)
+		m, err := qmp.NewSocketMonitor("unix", qsm.socketPath, 2*time.Second)
 		if err != nil {
 			return err
 		}
+		monitor = m
 		return nil
 	}); err != nil {
 		return nil, errors.Wrapf(err, "Connecting to qemu monitor")
 	}
-	return monitor, nil
+
+	if err := monitor.Connect(); err != nil {
+		return nil, fmt.Errorf("unable to connect to qemu socket: %w", err)
+	}
+	defer monitor.Disconnect()
+
+	return monitor.Run([]byte(command))
 }
 
-// Executes a query which provides the list of devices and their names
-func listQMPDevices(monitor *qmp.SocketMonitor, sockaddr string) (*QOMDev, error) {
-	listcmd := []byte(`{ "execute": "qom-list", "arguments": { "path": "/machine/peripheral-anon" } }`)
-	out, err := monitor.Run(listcmd)
+// listQMPDevices executes a query which provides the list of devices and their names
+func (qsm *qmpCommand) listQMPDevices() (*QOMDev, error) {
+	listcmd := `{ "execute": "qom-list", "arguments": { "path": "/machine/peripheral-anon" } }`
+
+	out, err := qsm.run(listcmd)
 	if err != nil {
 		return nil, errors.Wrapf(err, "Running QMP list command")
 	}
@@ -79,10 +117,11 @@ func listQMPDevices(monitor *qmp.SocketMonitor, sockaddr string) (*QOMDev, error
 	return &devs, nil
 }
 
-// Executes a query which provides the list of block devices and their names
-func listQMPBlkDevices(monitor *qmp.SocketMonitor, sockaddr string) (*QOMBlkDev, error) {
-	listcmd := []byte(`{ "execute": "query-block" }`)
-	out, err := monitor.Run(listcmd)
+// listQMPBlkDevices executes a query which provides the list of block devices and their names
+func (qsm *qmpCommand) listQMPBlkDevices() (*QOMBlkDev, error) {
+	listcmd := `{ "execute": "query-block" }`
+
+	out, err := qsm.run(listcmd)
 	if err != nil {
 		return nil, errors.Wrapf(err, "Running QMP list command")
 	}
@@ -94,19 +133,22 @@ func listQMPBlkDevices(monitor *qmp.SocketMonitor, sockaddr string) (*QOMBlkDev,
 	return &devs, nil
 }
 
-// Set the bootindex for the particular device
-func setBootIndexForDevice(monitor *qmp.SocketMonitor, device string, bootindex int) error {
-	cmd := fmt.Sprintf(`{ "execute":"qom-set", "arguments": { "path":"%s", "property":"bootindex", "value":%d } }`, device, bootindex)
-	if _, err := monitor.Run([]byte(cmd)); err != nil {
+// setBootIndexForDevice set the bootindex for the particular device
+func (qsm *qmpCommand) setBootIndexForDevice(device string, bootindex int) error {
+	cmd := fmt.Sprintf(
+		`{ "execute":"qom-set", "arguments": { "path":"%s", "property":"bootindex", "value":%d } }`,
+		device, bootindex,
+	)
+	if _, err := qsm.run(cmd); err != nil {
 		return errors.Wrapf(err, "Running QMP command")
 	}
 	return nil
 }
 
-// Delete a block device for the particular qemu instance
-func deleteBlockDevice(monitor *qmp.SocketMonitor, device string) error {
+// deleteBlockDevice deletes a block device for the particular qemu instance
+func (qsm *qmpCommand) deleteBlockDevice(device string) error {
 	cmd := fmt.Sprintf(`{ "execute": "device_del", "arguments": { "id":"%s" } }`, device)
-	if _, err := monitor.Run([]byte(cmd)); err != nil {
+	if _, err := qsm.run(cmd); err != nil {
 		return errors.Wrapf(err, "Running QMP command")
 	}
 	return nil

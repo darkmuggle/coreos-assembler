@@ -257,27 +257,16 @@ func (inst *QemuInstance) SwitchBootOrder() (err2 error) {
 		//Not applicable for other arches
 		return nil
 	}
-	monitor, err := newQMPMonitor(inst.tempdir)
+	monitor, err := getQmpMonitor(inst.tempdir)
 	if err != nil {
 		return fmt.Errorf("could not create QMP connection: %v", err)
 	}
-	if err := monitor.Connect(); err != nil {
-		return errors.Wrapf(err, "Could not connect to QMP device")
-	}
 
-	defer func() {
-		e := monitor.Disconnect()
-		if err2 != nil {
-			err2 = fmt.Errorf("%v; %v", err2, e)
-		} else {
-			err2 = e
-		}
-	}()
-	devs, err := listQMPDevices(monitor, inst.tempdir)
+	devs, err := monitor.listQMPDevices()
 	if err != nil {
 		return errors.Wrapf(err, "Could not list devices through qmp")
 	}
-	blkdevs, err := listQMPBlkDevices(monitor, inst.tempdir)
+	blkdevs, err := monitor.listQMPBlkDevices()
 	if err != nil {
 		return errors.Wrapf(err, "Could not list blk devices through qmp")
 	}
@@ -308,16 +297,16 @@ func (inst *QemuInstance) SwitchBootOrder() (err2 error) {
 	}
 
 	// unset bootindex for the boot device
-	if err := setBootIndexForDevice(monitor, bootdev, -1); err != nil {
+	if err := monitor.setBootIndexForDevice(bootdev, -1); err != nil {
 		return errors.Wrapf(err, "Could not set bootindex for bootdev")
 	}
 	// set bootindex to 1 to boot from disk
-	if err := setBootIndexForDevice(monitor, primarydev, 1); err != nil {
+	if err := monitor.setBootIndexForDevice(primarydev, 1); err != nil {
 		return errors.Wrapf(err, "Could not set bootindex for primarydev")
 	}
 	// set bootindex to 2 for secondary multipath disk
 	if secondarydev != "" {
-		if err := setBootIndexForDevice(monitor, secondarydev, 2); err != nil {
+		if err := monitor.setBootIndexForDevice(secondarydev, 2); err != nil {
 			return errors.Wrapf(err, "Could not set bootindex for secondarydev")
 		}
 	}
@@ -330,23 +319,12 @@ func (inst *QemuInstance) SwitchBootOrder() (err2 error) {
 func (inst *QemuInstance) RemovePrimaryBlockDevice() (err2 error) {
 	var primaryDevice string
 	var secondaryDevicePath string
-	monitor, err := newQMPMonitor(inst.tempdir)
+	monitor, err := getQmpMonitor(inst.tempdir)
 	if err != nil {
 		return errors.Wrapf(err, "Could not connect to QMP device")
 	}
-	if err := monitor.Connect(); err != nil {
-		return errors.Wrapf(err, "Could not connect to QMP device")
-	}
 
-	defer func() {
-		e := monitor.Disconnect()
-		if err2 != nil {
-			err2 = fmt.Errorf("%v; %v", err, e)
-		} else {
-			err2 = e
-		}
-	}()
-	blkdevs, err := listQMPBlkDevices(monitor, inst.tempdir)
+	blkdevs, err := monitor.listQMPBlkDevices()
 	if err != nil {
 		return errors.Wrapf(err, "Could not list block devices through qmp")
 	}
@@ -362,20 +340,19 @@ func (inst *QemuInstance) RemovePrimaryBlockDevice() (err2 error) {
 			}
 		}
 	}
-	err = setBootIndexForDevice(monitor, primaryDevice, -1)
-	if err != nil {
+	if err := monitor.setBootIndexForDevice(primaryDevice, -1); err != nil {
 		return errors.Wrapf(err, "Could not set bootindex for %v", primaryDevice)
 	}
 	primaryDevice = primaryDevice[:strings.LastIndex(primaryDevice, "/")]
-	err = deleteBlockDevice(monitor, primaryDevice)
-	if err != nil {
+
+	if err := monitor.deleteBlockDevice(primaryDevice); err != nil {
 		return errors.Wrapf(err, "Could not delete primary device %v", primaryDevice)
 	}
 	if len(secondaryDevicePath) == 0 {
 		return errors.Wrapf(err, "Could not find secondary device")
 	}
-	err = setBootIndexForDevice(monitor, secondaryDevicePath, 1)
-	if err != nil {
+
+	if err := monitor.setBootIndexForDevice(secondaryDevicePath, 1); err != nil {
 		return errors.Wrapf(err, "Could not set bootindex for  %v", secondaryDevicePath)
 	}
 
