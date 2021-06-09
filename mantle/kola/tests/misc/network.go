@@ -59,6 +59,15 @@ func init() {
 		Distros:     []string{"rhcos"},
 		Platforms:   []string{"qemu-unpriv"},
 	})
+	// This test follows the same network configuration used on https://github.com/RHsyseng/rhcos-slb
+	// with a slight change, where the MCO script is run from ignition: https://github.com/RHsyseng/rhcos-slb/blob/main/setup-ovs.sh.
+	// and we're using veth pairs instead of real nic when setting the bond
+	register.RegisterTest(&register.Test{
+		Run:         NetworkBondWithDhcp,
+		ClusterSize: 0,
+		Name:        "rhcos.network.bondWithDhcp",
+		Distros:     []string{"rhcos"},
+	})
 }
 
 type listener struct {
@@ -294,7 +303,150 @@ var (
               echo "ovs bridge already present"
           fi
 `
+
+	setupVethPairs = `#!/usr/bin/env bash
+          set -ex
+
+          create_veth_pair() {
+            veth_name=$1
+            host_side_mac_address=$2
+            container_side_cidr=$3
+
+            # create veth pair and assign a namespace to veth-container
+		    ip link add ${veth_name}-host type veth peer name ${veth_name}-container
+		    ip link set ${veth_name}-container netns container
+
+		    # assign an MAC address to the host-side veth end
+		    ip link set dev ${veth_name}-host address ${host_side_mac_address}
+
+		    # assign an IP address to container-side veth end and bring it up
+		    ip netns exec container ip address add ${container_side_cidr} dev ${veth_name}-container
+		    ip netns exec container ip link set ${veth_name}-container up
+          }
+          if [[ ! -f /boot/mac_addresses ]] ; then
+            echo "no mac address configuration file found .. skipping capture-veth-pairs"
+            exit 0
+          fi
+
+         echo "configure veth pairs"
+	 	 primary_mac=$(cat /boot/mac_addresses | awk -F= '/PRIMARY_MAC/ {print $2}')
+		 secondary_mac=$(cat /boot/mac_addresses | awk -F= '/SECONDARY_MAC/ {print $2}')
+
+		 # create a network namespace
+		 ip netns add container
+
+		 create_veth_pair veth1 $primary_mac 192.168.0.59
+		 create_veth_pair veth2 $secondary_mac 192.168.0.60
+`
 )
+
+func NetworkBondWithDhcp(c cluster.TestCluster) {
+	primaryMac := "52:55:00:d1:56:00"
+	secondaryMac := "52:55:00:d1:56:01"
+	primaryIp := "192.168.0.55"
+
+	setupBondWithDhcpTest(c, primaryMac, secondaryMac, primaryIp)
+
+	checkOvsBridge(c, primaryMac, primaryIp)
+}
+
+func setupBondWithDhcpTest(c cluster.TestCluster, primaryMac, secondaryMac, primaryIp string) {
+	setupVmWithVethPairs(c, primaryMac, secondaryMac)
+
+	//TODO here we will add a dnsmaq container
+	ActivateVethPairs(c, []string{"veth1-host", "veth2-host"})
+}
+
+// Tell NM to manage the `veth-host` interface and bring it up (will attempt DHCP).
+// Do this after we start dnsmasq so we don't have to deal with DHCP timeouts.
+func ActivateVethPairs(c cluster.TestCluster, vethList []string) {
+	m := c.Machines()[0]
+	for _, veth := range vethList {
+		c.SSH(m, fmt.Sprintf("sudo nmcli dev set %s managed yes", veth))
+		c.SSH(m, fmt.Sprintf("sudo ip link set %s up", veth))
+	}
+}
+
+func setupVmWithVethPairs(c cluster.TestCluster, primaryMac, secondaryMac string) {
+	var m platform.Machine
+	var err error
+	options := platform.QemuMachineOptions{}
+
+	var userdata *conf.UserData = conf.Ignition(fmt.Sprintf(`{
+		"ignition": {
+			"version": "3.2.0"
+		},
+		"storage": {
+			"files": [
+				{
+					"path": "/etc/systemd/network/99-default.link",
+					"contents": { "source": "data:text/plain;base64,%s" },
+					"mode": 420
+				},
+				{
+					"path": "/etc/NetworkManager/conf.d/10-dhcp-config.conf",
+					"contents": { "source": "data:text/plain;base64,%s" },
+					"mode": 420
+				},
+				{
+					"path": "/usr/local/bin/capture-macs",
+					"contents": { "source": "data:text/plain;base64,%s" },
+					"mode": 755
+				},
+				{
+					"path": "/usr/local/bin/create-veth-pairs",
+					"contents": { "source": "data:text/plain;base64,%s" },
+					"mode": 755
+				},
+				{
+					"path": "/usr/local/bin/setup-ovs",
+					"contents": { "source": "data:text/plain;base64,%s" },
+					"mode": 755
+				}
+			]
+		},
+		"systemd": {
+			"units": [
+				{
+					"enabled": true,
+					"name": "openvswitch.service"
+				},
+				{
+					"contents": "[Unit]\nDescription=Capture MAC address from kargs\nAfter=network-online.target\nAfter=openvswitch.service\nConditionKernelCommandLine=macAddressList\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/capture-macs\n\n[Install]\nRequiredBy=multi-user.target\n",
+					"enabled": true,
+					"name": "capture-macs.service"
+				},
+				{
+					"contents": "[Unit]\nDescription=Create VETH Pairs\nAfter=network-online.target\nAfter=capture-macs.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/create-veth-pairs\n\n[Install]\nRequiredBy=multi-user.target\n",
+					"enabled": true,
+					"name": "create-veth-pairs.service"
+				},
+				{
+					"contents": "[Unit]\nDescription=Setup OVS bonding\nAfter=create-veth-pairs.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/setup-ovs\n\n[Install]\nRequiredBy=multi-user.target\n",
+					"enabled": false,
+					"name": "setup-ovs.service"
+				}
+			]
+		}
+	}`, base64.StdEncoding.EncodeToString([]byte(defaultLinkConfig)), base64.StdEncoding.EncodeToString([]byte(dhcpClientConfig)), base64.StdEncoding.EncodeToString([]byte(captureMacsScript)), base64.StdEncoding.EncodeToString([]byte(setupVethPairs)), base64.StdEncoding.EncodeToString([]byte(setupOvsScript))))
+
+	switch pc := c.Cluster.(type) {
+	// These cases have to be separated because when put together to the same case statement
+	// the golang compiler no longer checks that the individual types in the case have the
+	// NewMachineWithQemuOptions function, but rather whether platform.Cluster
+	// does which fails
+	case *unprivqemu.Cluster:
+		m, err = pc.NewMachineWithQemuOptions(userdata, options)
+	default:
+		panic("unreachable")
+	}
+	if err != nil {
+		c.Fatal(err)
+	}
+
+	// Add karg needed for the ignition to configure the network properly.
+	addKernelArgs(c, m, []string{fmt.Sprintf("macAddressList=%s,%s", primaryMac, secondaryMac)})
+}
 
 // NetworkSecondaryNics verifies that secondary NICs are created on the node
 func NetworkSecondaryNics(c cluster.TestCluster) {
