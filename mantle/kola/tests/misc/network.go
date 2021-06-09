@@ -303,10 +303,10 @@ func NetworkSecondaryNics(c cluster.TestCluster) {
 
 	setupMultipleNetworkTest(c, primaryMac, secondaryMac)
 
-	checkOvsBridge(c, primaryMac)
+	checkOvsBridge(c, primaryMac, "")
 }
 
-func checkOvsBridge(c cluster.TestCluster, setPrimaryMac string) {
+func checkOvsBridge(c cluster.TestCluster, setPrimaryMac, setPrimaryIp string) {
 	var err error
 	machineIdx := 0
 
@@ -318,7 +318,18 @@ func checkOvsBridge(c cluster.TestCluster, setPrimaryMac string) {
 
 	// check bond interface got the primary MAC
 	if bondInterfaceMACAddress != setPrimaryMac {
-		c.Fatalf("ovs-bridge %s primary MAC %s does not match expected IP", ovsBridgeName, bondInterfaceMACAddress, setPrimaryMac)
+		c.Fatalf("ovs-bridge %s primary MAC %s does not match expected MAC", ovsBridgeName, bondInterfaceMACAddress, setPrimaryMac)
+	}
+
+	if setPrimaryIp != "" {
+		bondInterfaceIPAddress, err := getBondIfaceIP(c, machineIdx, ovsBridgeName)
+		if err != nil {
+			c.Fatalf("failed to fetch bond IP Address: %v", err)
+		}
+
+		if bondInterfaceIPAddress != setPrimaryIp {
+			c.Fatalf("ovs-bridge %s primary IP %s does not match expected IP", ovsBridgeName, bondInterfaceMACAddress, setPrimaryMac)
+		}
 	}
 }
 
@@ -335,6 +346,20 @@ func getBondIfaceMAC(c cluster.TestCluster, machineIdx int, interfaceName string
 	}
 
 	return macAddress.String(), nil
+}
+
+func getBondIfaceIP(c cluster.TestCluster, machineIdx int, interfaceName string) (string, error) {
+	m := c.Machines()[machineIdx]
+
+	output := string(c.MustSSH(m, fmt.Sprintf("nmcli -g ipv4.addresses connection show %s", interfaceName)))
+
+	var ipAddress net.IP
+	var err error
+	if ipAddress, _, err = net.ParseCIDR(output); err != nil {
+		return "", fmt.Errorf("failed to parse IP address %v for interface Name %s: %v", output, interfaceName, err)
+	}
+
+	return ipAddress.String(), nil
 }
 
 func addKernelArgs(c cluster.TestCluster, m platform.Machine, args []string) {
