@@ -15,6 +15,7 @@
 package misc
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -28,6 +29,7 @@ import (
 	"github.com/coreos/mantle/platform/conf"
 	"github.com/coreos/mantle/platform/machine/unprivqemu"
 	"github.com/coreos/mantle/util"
+	"github.com/coreos/mantle/lang/worker"
 )
 
 func init() {
@@ -350,10 +352,42 @@ func NetworkBondWithDhcp(c cluster.TestCluster) {
 	checkOvsBridge(c, primaryMac, primaryIp)
 }
 
+// setupDHCPServerContainer creates a dnsmaq container inside the vm that will interact with the veth pairs
+func setupDHCPServerContainer(c cluster.TestCluster, primaryMac, primaryIp string) {
+	m := c.Machines()[0]
+
+	genDHCPServerContainer(c,m)
+
+	wg := worker.NewWorkerGroup(context.Background(), 1)
+
+	dCmd := "podman run --rm dnsmaq --privileged --network ns:/var/run/netns/container dnsmasq"
+
+	dhcpContainer := func(ctx context.Context) error {
+		output, err := c.SSH(m, dCmd)
+		if err != nil {
+			return fmt.Errorf("failed to run %q: output: %q status: %q", dCmd, output, err)
+		}
+		return nil
+	}
+
+	if err := wg.Start(dhcpContainer); err != nil {
+		c.Fatal(wg.WaitError(err))
+	}
+}
+
+// make a podman container out of binaries on the host
+func genDHCPServerContainer(c cluster.TestCluster, m platform.Machine) {
+	cmd := `tmpdir=$(mktemp -d); cd $tmpdir; echo -e "FROM scratch\nRUN dnf -y install systemd dnsmasq iproute iputils && dnf clean all && systemctl enable dnsmasq\nRUN echo -e "dhcp-range=192.168.0.50,192.168.0.60,12h\ndhcp-host=52:55:00:d1:56:00,192.168.0.55" > /etc/dnsmasq.d/dhcp && systemctl restart dnsmasq" > Dockerfile;
+	      sudo podman build -t dnsmaq .`
+
+	c.MustSSH(m, cmd)
+}
+
 func setupBondWithDhcpTest(c cluster.TestCluster, primaryMac, secondaryMac, primaryIp string) {
 	setupVmWithVethPairs(c, primaryMac, secondaryMac)
 
-	//TODO here we will add a dnsmaq container
+	setupDHCPServerContainer(c, primaryMac, primaryIp)
+
 	ActivateVethPairs(c, []string{"veth1-host", "veth2-host"})
 }
 
@@ -410,6 +444,10 @@ func setupVmWithVethPairs(c cluster.TestCluster, primaryMac, secondaryMac string
 				{
 					"enabled": true,
 					"name": "openvswitch.service"
+				},
+				{
+					"enabled": true,
+					"name": "docker.service"
 				},
 				{
 					"contents": "[Unit]\nDescription=Capture MAC address from kargs\nAfter=network-online.target\nAfter=openvswitch.service\nConditionKernelCommandLine=macAddressList\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/capture-macs\n\n[Install]\nRequiredBy=multi-user.target\n",
