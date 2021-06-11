@@ -15,7 +15,6 @@
 package misc
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -29,7 +28,6 @@ import (
 	"github.com/coreos/mantle/platform/conf"
 	"github.com/coreos/mantle/platform/machine/unprivqemu"
 	"github.com/coreos/mantle/util"
-	"github.com/coreos/mantle/lang/worker"
 )
 
 func init() {
@@ -207,6 +205,11 @@ var (
           dhcp=dhclient
 `
 
+	dnsmasqConfig = `
+		  dhcp-range=192.168.0.50,192.168.0.60,12
+		  dhcp-host=52:55:00:d1:56:00,192.168.0.55
+`
+
 	captureMacsScript = `#!/usr/bin/env bash
           set -ex
           echo "Processing MAC addresses"
@@ -228,13 +231,12 @@ var (
           fi
           export PRIMARY_MAC=$(echo $macs | awk -F, '{print $1}')
           export SECONDARY_MAC=$(echo $macs | awk -F, '{print $2}')
-          mount "/dev/disk/by-label/boot" /var/mnt
-          echo -e "PRIMARY_MAC=${PRIMARY_MAC}\nSECONDARY_MAC=${SECONDARY_MAC}" > /var/mnt/mac_addresses
-          umount /var/mnt
+		  mount -o remount,rw /boot
+          echo -e "PRIMARY_MAC=${PRIMARY_MAC}\nSECONDARY_MAC=${SECONDARY_MAC}" > /boot/mac_addresses
 	`
 
 	setupOvsScript = `#!/usr/bin/env bash
-          set -ex
+          set -eux
           if [[ ! -f /boot/mac_addresses ]] ; then
             echo "no mac address configuration file found .. skipping setup-ovs"
             exit 0
@@ -306,7 +308,7 @@ var (
           fi
 `
 
-	setupVethPairs = `#!/usr/bin/env bash
+	setupVethPairs = `#!/usr/bin/bash
           set -ex
 
           create_veth_pair() {
@@ -346,55 +348,16 @@ func NetworkBondWithDhcp(c cluster.TestCluster) {
 	primaryMac := "52:55:00:d1:56:00"
 	secondaryMac := "52:55:00:d1:56:01"
 	primaryIp := "192.168.0.55"
-
-	setupBondWithDhcpTest(c, primaryMac, secondaryMac, primaryIp)
-
-	checkOvsBridge(c, primaryMac, primaryIp)
-}
-
-// setupDHCPServerContainer creates a dnsmaq container inside the vm that will interact with the veth pairs
-func setupDHCPServerContainer(c cluster.TestCluster, primaryMac, primaryIp string) {
-	m := c.Machines()[0]
-
-	genDHCPServerContainer(c,m)
-
-	wg := worker.NewWorkerGroup(context.Background(), 1)
-
-	dCmd := "podman run --rm dnsmaq --privileged --network ns:/var/run/netns/container dnsmasq"
-
-	dhcpContainer := func(ctx context.Context) error {
-		output, err := c.SSH(m, dCmd)
-		if err != nil {
-			return fmt.Errorf("failed to run %q: output: %q status: %q", dCmd, output, err)
-		}
-		return nil
-	}
-
-	if err := wg.Start(dhcpContainer); err != nil {
-		c.Fatal(wg.WaitError(err))
-	}
-}
-
-// make a podman container out of binaries on the host
-func genDHCPServerContainer(c cluster.TestCluster, m platform.Machine) {
-	cmd := `tmpdir=$(mktemp -d); cd $tmpdir; echo -e "FROM scratch\nRUN dnf -y install systemd dnsmasq iproute iputils && dnf clean all && systemctl enable dnsmasq\nRUN echo -e "dhcp-range=192.168.0.50,192.168.0.60,12h\ndhcp-host=52:55:00:d1:56:00,192.168.0.55" > /etc/dnsmasq.d/dhcp && systemctl restart dnsmasq" > Dockerfile;
-	      sudo podman build -t dnsmaq .`
-
-	c.MustSSH(m, cmd)
-}
-
-func setupBondWithDhcpTest(c cluster.TestCluster, primaryMac, secondaryMac, primaryIp string) {
 	setupVmWithVethPairs(c, primaryMac, secondaryMac)
-
-	setupDHCPServerContainer(c, primaryMac, primaryIp)
-
-	ActivateVethPairs(c, []string{"veth1-host", "veth2-host"})
+	activateVethPairs(c, []string{"veth1-host", "veth2-host"})
+	checkOvsBridge(c, primaryMac, primaryIp)
 }
 
 // Tell NM to manage the `veth-host` interface and bring it up (will attempt DHCP).
 // Do this after we start dnsmasq so we don't have to deal with DHCP timeouts.
-func ActivateVethPairs(c cluster.TestCluster, vethList []string) {
+func activateVethPairs(c cluster.TestCluster, vethList []string) {
 	m := c.Machines()[0]
+	c.SSH(m, "sudo nmcli c")
 	for _, veth := range vethList {
 		c.SSH(m, fmt.Sprintf("sudo nmcli dev set %s managed yes", veth))
 		c.SSH(m, fmt.Sprintf("sudo ip link set %s up", veth))
@@ -436,6 +399,11 @@ func setupVmWithVethPairs(c cluster.TestCluster, primaryMac, secondaryMac string
 					"path": "/usr/local/bin/setup-ovs",
 					"contents": { "source": "data:text/plain;base64,%s" },
 					"mode": 755
+				},
+				{
+					"path": "/etc/dnsmasq.d/dhcp-server.conf",
+					"contents": { "source": "data:text/plain;base64,%s" },
+					"mode": 644
 				}
 			]
 		},
@@ -446,11 +414,7 @@ func setupVmWithVethPairs(c cluster.TestCluster, primaryMac, secondaryMac string
 					"name": "openvswitch.service"
 				},
 				{
-					"enabled": true,
-					"name": "docker.service"
-				},
-				{
-					"contents": "[Unit]\nDescription=Capture MAC address from kargs\nAfter=network-online.target\nAfter=openvswitch.service\nConditionKernelCommandLine=macAddressList\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/capture-macs\n\n[Install]\nRequiredBy=multi-user.target\n",
+					"contents": "[Unit]\nDescription=Capture MAC address from kargs\nBefore=network-online.target\n\nConditionKernelCommandLine=macAddressList\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/capture-macs\n\n[Install]\nRequiredBy=multi-user.target\n",
 					"enabled": true,
 					"name": "capture-macs.service"
 				},
@@ -463,10 +427,21 @@ func setupVmWithVethPairs(c cluster.TestCluster, primaryMac, secondaryMac string
 					"contents": "[Unit]\nDescription=Setup OVS bonding\nAfter=create-veth-pairs.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/setup-ovs\n\n[Install]\nRequiredBy=multi-user.target\n",
 					"enabled": false,
 					"name": "setup-ovs.service"
+				},
+				{
+					"enabled": true,
+					"name": "dnsmasq.service"
 				}
 			]
 		}
-	}`, base64.StdEncoding.EncodeToString([]byte(defaultLinkConfig)), base64.StdEncoding.EncodeToString([]byte(dhcpClientConfig)), base64.StdEncoding.EncodeToString([]byte(captureMacsScript)), base64.StdEncoding.EncodeToString([]byte(setupVethPairs)), base64.StdEncoding.EncodeToString([]byte(setupOvsScript))))
+	}`,
+		base64.StdEncoding.EncodeToString([]byte(defaultLinkConfig)),
+		base64.StdEncoding.EncodeToString([]byte(dhcpClientConfig)),
+		base64.StdEncoding.EncodeToString([]byte(captureMacsScript)),
+		base64.StdEncoding.EncodeToString([]byte(setupVethPairs)),
+		base64.StdEncoding.EncodeToString([]byte(setupOvsScript)),
+		base64.StdEncoding.EncodeToString([]byte(dnsmasqConfig))),
+	)
 
 	switch pc := c.Cluster.(type) {
 	// These cases have to be separated because when put together to the same case statement
@@ -481,18 +456,19 @@ func setupVmWithVethPairs(c cluster.TestCluster, primaryMac, secondaryMac string
 	if err != nil {
 		c.Fatal(err)
 	}
-
-	// Add karg needed for the ignition to configure the network properly.
-	addKernelArgs(c, m, []string{fmt.Sprintf("macAddressList=%s,%s", primaryMac, secondaryMac)})
+	if _, err := c.SSH(m, fmt.Sprintf("sudo rpm-ostree kargs --append=macAddressList=%s,%s", primaryMac, secondaryMac)); err != nil {
+		c.Fatal(err)
+	}
+	if err := m.Reboot(); err != nil {
+		c.Fatal(err)
+	}
 }
 
 // NetworkSecondaryNics verifies that secondary NICs are created on the node
 func NetworkSecondaryNics(c cluster.TestCluster) {
 	primaryMac := "52:55:00:d1:56:00"
 	secondaryMac := "52:55:00:d1:56:01"
-
 	setupMultipleNetworkTest(c, primaryMac, secondaryMac)
-
 	checkOvsBridge(c, primaryMac, "")
 }
 
@@ -552,24 +528,6 @@ func getBondIfaceIP(c cluster.TestCluster, machineIdx int, interfaceName string)
 	return ipAddress.String(), nil
 }
 
-func addKernelArgs(c cluster.TestCluster, m platform.Machine, args []string) {
-	if len(args) == 0 {
-		return
-	}
-
-	rpmOstreeCommand := "sudo rpm-ostree kargs"
-	for _, arg := range args {
-		rpmOstreeCommand = fmt.Sprintf("%s --append %s", rpmOstreeCommand, arg)
-	}
-
-	c.MustSSH(m, rpmOstreeCommand)
-
-	err := m.Reboot()
-	if err != nil {
-		c.Fatalf("failed to reboot the machine: %v", err)
-	}
-}
-
 func setupMultipleNetworkTest(c cluster.TestCluster, primaryMac, secondaryMac string) {
 	var m platform.Machine
 	var err error
@@ -603,6 +561,11 @@ func setupMultipleNetworkTest(c cluster.TestCluster, primaryMac, secondaryMac st
 					"path": "/usr/local/bin/setup-ovs",
 					"contents": { "source": "data:text/plain;base64,%s" },
 					"mode": 755
+				},
+				{
+					"path": "/etc/dnsmasq.d/dhcp-server.conf",
+					"contents": { "source": "data:text/plain;base64,%s" },
+					"mode": 644
 				}
 			]
 		},
@@ -621,11 +584,20 @@ func setupMultipleNetworkTest(c cluster.TestCluster, primaryMac, secondaryMac st
 					"contents": "[Unit]\nDescription=Setup OVS bonding\nAfter=capture-macs.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/setup-ovs\n\n[Install]\nRequiredBy=multi-user.target\n",
 					"enabled": true,
 					"name": "setup-ovs.service"
+				},
+				{
+					"enabled": true,
+					"name": "dnsmasq.service"
 				}
-
 			]
 		}
-	}`, base64.StdEncoding.EncodeToString([]byte(defaultLinkConfig)), base64.StdEncoding.EncodeToString([]byte(dhcpClientConfig)), base64.StdEncoding.EncodeToString([]byte(captureMacsScript)), base64.StdEncoding.EncodeToString([]byte(setupOvsScript))))
+	}`,
+		base64.StdEncoding.EncodeToString([]byte(defaultLinkConfig)),
+		base64.StdEncoding.EncodeToString([]byte(dhcpClientConfig)),
+		base64.StdEncoding.EncodeToString([]byte(captureMacsScript)),
+		base64.StdEncoding.EncodeToString([]byte(setupOvsScript)),
+		base64.StdEncoding.EncodeToString([]byte(dnsmasqConfig))),
+	)
 
 	switch pc := c.Cluster.(type) {
 	// These cases have to be separated because when put together to the same case statement
@@ -640,7 +612,14 @@ func setupMultipleNetworkTest(c cluster.TestCluster, primaryMac, secondaryMac st
 	if err != nil {
 		c.Fatal(err)
 	}
-
-	// Add karg needed for the ignition to configure the network properly.
-	addKernelArgs(c, m, []string{fmt.Sprintf("macAddressList=%s,%s", primaryMac, secondaryMac)})
+	if _, err := c.SSH(m, fmt.Sprintf("sudo rpm-ostree kargs --append=macAddressList=%s,%s", primaryMac, secondaryMac)); err != nil {
+		c.Fatal(err)
+	}
+	oldBootId, err := platform.GetMachineBootId(m)
+	if err != nil {
+		c.Fatal(err)
+	}
+	if err := m.WaitForReboot(2*time.Minute, oldBootId); err != nil {
+		c.Fatal(err)
+	}
 }
