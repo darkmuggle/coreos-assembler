@@ -1,5 +1,9 @@
 PREFIX ?= /usr
 DESTDIR ?=
+toolsLong=$(shell cd .. && $ git log -n 1 --date=short --pretty=format:%H -- tools)
+toolsShort=$(shell cd .. && $ git log -n 1 --date=short --pretty=format:%h -- tools)
+toolsVersion=$(shell cd .. && $ git log -n 1 --date=short --pretty=format:%cs~%h -- tools)
+minioFlags := -X github.com/minio/minio/cmd.Version=$(toolsVersion) -X github.com/minio/minio/cmd.ReleaseTag=COSA-$(toolsVersion) -X github.com/minio/minio/cmd.CommitID=cosa-$(toolsLong) -X github.com/minio/minio/cmd.ShortCommitID=cosa-$(toolsShort)
 
 export CGO_ENABLED=0
 build:
@@ -15,7 +19,9 @@ build:
 	test -e bin/minio || \
 	(DIR=$$(pwd) && \
 	cd ./vendor/github.com/minio/minio && \
-	GOOS=linux GO111MODULE=on CGO_ENABLED=0 go build -tags kqueue -o $$DIR/bin/minio .)
+	GOOS=linux GO111MODULE=on CGO_ENABLED=0 \
+	go build -tags kqueue -trimpath --ldflags "$(minioFlags)" -o $$DIR/bin/minio . )
+
 clean:
 	rm -rfv bin
 
