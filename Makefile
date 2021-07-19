@@ -21,6 +21,7 @@ tests_checked:=$(patsubst tests/%,tests/.%.shellchecked,${tests})
 cwd:=$(shell find . -maxdepth 1 -type f -executable -print)
 cwd_checked:=$(patsubst ./%,.%.shellchecked,${cwd})
 GOARCH:=$(shell uname -m)
+export COSA_META_SCHEMA:=$(shell pwd)/src/v1.json
 ifeq ($(GOARCH),x86_64)
         GOARCH="amd64"
 else ifeq ($(GOARCH),aarch64)
@@ -46,7 +47,6 @@ flake8:
 
 unittest:
 	COSA_TEST_META_PATH=`pwd`/fixtures \
-		COSA_META_SCHEMA=`pwd`/src/schema/v1.json \
 		PYTHONPATH=`pwd`/src python3 -m pytest tests/
 
 clean:
